@@ -265,27 +265,56 @@ void *input_thread_func(void *args)
     
     LOG_INFO("Thread de entrada iniciado");
     
+    /* Mostrar prompt inicial */
+    pthread_mutex_lock(&ctx->output_mutex);
+    printf("> ");
+    fflush(stdout);
+    pthread_mutex_unlock(&ctx->output_mutex);
+    
     while (ctx->running && ctx->connected) {
-        /* Mostrar prompt */
-        pthread_mutex_lock(&ctx->output_mutex);
-        printf("> ");
-        fflush(stdout);
-        pthread_mutex_unlock(&ctx->output_mutex);
+        /* Leer entrada del usuario con timeout usando select */
+        fd_set readfds;
+        struct timeval timeout;
+        int stdin_fd = STDIN_FILENO;
         
-        /* Leer entrada del usuario */
-        if (read_user_input(input_buffer, sizeof(input_buffer)) > 0) {
-            /* Procesar comando o mensaje */
-            if (!process_client_command(ctx, input_buffer)) {
-                /* Es un mensaje normal, enviarlo al servidor */
-                if (send_chat_message(ctx, input_buffer) < 0) {
-                    LOG_ERROR("Error enviando mensaje al servidor");
+        FD_ZERO(&readfds);
+        FD_SET(stdin_fd, &readfds);
+        
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+        
+        int select_result = select(stdin_fd + 1, &readfds, NULL, NULL, &timeout);
+        
+        if (select_result > 0 && FD_ISSET(stdin_fd, &readfds)) {
+            /* Hay entrada disponible */
+            if (read_user_input(input_buffer, sizeof(input_buffer)) > 0) {
+                /* Verificar si aún estamos ejecutándose */
+                if (!ctx->running || !ctx->connected) {
                     break;
                 }
+                
+                /* Procesar comando o mensaje */
+                if (!process_client_command(ctx, input_buffer)) {
+                    /* Es un mensaje normal, enviarlo al servidor */
+                    if (send_chat_message(ctx, input_buffer) < 0) {
+                        LOG_ERROR("Error enviando mensaje al servidor");
+                        break;
+                    }
+                }
+                
+                /* Mostrar nuevo prompt solo después de procesar entrada */
+                if (ctx->running && ctx->connected) {
+                    pthread_mutex_lock(&ctx->output_mutex);
+                    printf("> ");
+                    fflush(stdout);
+                    pthread_mutex_unlock(&ctx->output_mutex);
+                }
             }
+        } else if (select_result < 0 && errno != EINTR) {
+            LOG_ERROR("Error en select: %s", strerror(errno));
+            break;
         }
-        
-        /* Pequeña pausa para evitar uso excesivo de CPU */
-        usleep(100000); /* 100ms */
+        /* Si select_result == 0, fue timeout, continuamos el loop para verificar ctx->running */
     }
     
     LOG_INFO("Thread de entrada finalizado");
@@ -451,7 +480,22 @@ int process_client_command(client_context_t *ctx, const char *input)
         pthread_mutex_lock(&ctx->output_mutex);
         printf("Desconectando del chat...\n");
         pthread_mutex_unlock(&ctx->output_mutex);
+        
+        /* Enviar mensaje de desconexión al servidor */
+        chat_message_t disconnect_msg;
+        init_message(&disconnect_msg, MSG_DISCONNECT, ctx->username, "");
+        char buffer[BUFFER_SIZE];
+        ssize_t msg_size = serialize_message(&disconnect_msg, buffer, sizeof(buffer));
+        if (msg_size > 0) {
+            send(ctx->server_socket, buffer, msg_size, 0);
+        }
+        
         ctx->running = 0;
+        ctx->connected = 0;
+        
+        /* Forzar salida inmediata cerrando el socket */
+        SAFE_CLOSE(ctx->server_socket);
+        
         return 1;
     }
     
@@ -640,7 +684,37 @@ int run_client(const char *username, const char *server_ip, int server_port)
         return ERROR_THREAD;
     }
     
-    /* Esperar a que terminen los threads */
+    /* Esperar a que terminen los threads normalmente */
+    /* Solo usar timeout si explícitamente se solicitó salida */
+    while (client_ctx.running && client_ctx.connected) {
+        usleep(500000); /* 500ms */
+    }
+    
+    /* Ahora que running=0 o connected=0, esperar que threads terminen */
+    int timeout_count = 0;
+    const int max_timeout = 50; /* 5 segundos máximo para terminación */
+    
+    /* Esperar a que los threads realmente terminen */
+    while (timeout_count < max_timeout) {
+        usleep(100000); /* 100ms */
+        timeout_count++;
+        
+        /* Verificar si los threads aún están activos */
+        int receive_alive = (pthread_kill(client_ctx.receive_thread, 0) == 0);
+        int input_alive = (pthread_kill(client_ctx.input_thread, 0) == 0);
+        
+        if (!receive_alive && !input_alive) {
+            break; /* Ambos threads han terminado */
+        }
+    }
+    
+    if (timeout_count >= max_timeout) {
+        LOG_INFO("Timeout esperando terminación de threads, cancelando...");
+        pthread_cancel(client_ctx.receive_thread);
+        pthread_cancel(client_ctx.input_thread);
+    }
+    
+    /* Hacer join a los threads */
     pthread_join(client_ctx.receive_thread, NULL);
     pthread_join(client_ctx.input_thread, NULL);
     

@@ -64,14 +64,25 @@ void cleanup_server_context(server_context_t *ctx)
     /* Cerrar socket del servidor */
     SAFE_CLOSE(ctx->server_socket);
     
-    /* Desconectar todos los clientes */
+    /* Desconectar todos los clientes agresivamente */
+    LOG_INFO("Desconectando todos los clientes...");
     pthread_mutex_lock(&ctx->clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (ctx->clients[i].active) {
+            LOG_INFO("Desconectando cliente '%s'", ctx->clients[i].username);
+            
+            /* Cerrar socket inmediatamente para forzar desconexión */
+            shutdown(ctx->clients[i].socket_fd, SHUT_RDWR);
             SAFE_CLOSE(ctx->clients[i].socket_fd);
             ctx->clients[i].active = 0;
+            
+            /* Cancelar thread del cliente si es posible */
+            if (ctx->clients[i].thread_id != 0) {
+                pthread_cancel(ctx->clients[i].thread_id);
+            }
         }
     }
+    ctx->client_count = 0;
     pthread_mutex_unlock(&ctx->clients_mutex);
     
     /* Destruir mutex */
@@ -171,6 +182,7 @@ int add_client(server_context_t *ctx, int client_socket,
     client->address = client_addr;
     client->connect_time = time(NULL);
     client->active = 1;
+    client->disconnect_notified = 0;
     strncpy(client->username, username, USERNAME_SIZE - 1);
     client->username[USERNAME_SIZE - 1] = '\0';
     
@@ -191,19 +203,44 @@ int remove_client(server_context_t *ctx, int client_socket)
 {
     if (!ctx) return -1;
     
+    /* Si el servidor se está cerrando, no intentar remover */
+    if (!ctx->running) {
+        return 0; /* Silenciosamente ignorar durante el cierre */
+    }
+    
     pthread_mutex_lock(&ctx->clients_mutex);
     
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (ctx->clients[i].active && ctx->clients[i].socket_fd == client_socket) {
+            /* Solo enviar notificación si no se ha enviado ya */
+            if (!ctx->clients[i].disconnect_notified) {
+                /* Notificar a otros clientes sobre la desconexión */
+                char notification_text[MESSAGE_SIZE];
+                snprintf(notification_text, sizeof(notification_text), 
+                         "[Usuario %s se desconectó]", ctx->clients[i].username);
+                
+                chat_message_t disconnect_notification;
+                init_message(&disconnect_notification, MSG_NOTIFICATION, 
+                           "Sistema", notification_text);
+                
+                /* Marcar que ya se envió la notificación */
+                ctx->clients[i].disconnect_notified = 1;
+                
+                /* Enviar notificación a todos los otros clientes */
+                pthread_mutex_unlock(&ctx->clients_mutex);
+                int sent = broadcast_message(ctx, &disconnect_notification, client_socket);
+                LOG_INFO("Cliente '%s' (socket %d) se desconectó. Notificación enviada a %d clientes", 
+                        ctx->clients[i].username, client_socket, sent);
+                pthread_mutex_lock(&ctx->clients_mutex);
+            }
+            
             /* Marcar cliente como inactivo */
             ctx->clients[i].active = 0;
             SAFE_CLOSE(ctx->clients[i].socket_fd);
             ctx->client_count--;
             
-            LOG_INFO("Cliente '%s' removido (total: %d/%d)", 
-                    ctx->clients[i].username, ctx->client_count, MAX_CLIENTS);
-            
             pthread_mutex_unlock(&ctx->clients_mutex);
+            LOG_INFO("Cliente removido (total: %d/%d)", ctx->client_count, MAX_CLIENTS);
             return 0;
         }
     }
@@ -433,7 +470,28 @@ int process_client_message(server_context_t *ctx, client_info_t *client,
             
         case MSG_DISCONNECT:
             /* El cliente solicita desconectarse */
-            LOG_INFO("Cliente '%s' solicita desconexión", client->username);
+            LOG_INFO("Cliente '%s' (socket %d) solicita desconexión", client->username, client->socket_fd);
+            
+            /* Marcar que ya se procesó la desconexión */
+            client->disconnect_notified = 1;
+            
+            /* Notificar a otros clientes sobre la desconexión */
+            {
+                chat_message_t disconnect_notification;
+                char notification_text[MESSAGE_SIZE];
+                
+                snprintf(notification_text, sizeof(notification_text), 
+                         "[Usuario %s se desconectó]", client->username);
+                
+                init_message(&disconnect_notification, MSG_NOTIFICATION, 
+                           "Sistema", notification_text);
+                
+                /* Enviar notificación a todos los otros clientes */
+                int sent = broadcast_message(ctx, &disconnect_notification, client->socket_fd);
+                LOG_INFO("Notificación de desconexión de '%s' enviada a %d clientes", 
+                        client->username, sent);
+            }
+            
             client->active = 0;
             return -1;
             
@@ -527,6 +585,13 @@ void signal_handler(int sig)
     
     if (g_server_ctx) {
         g_server_ctx->running = 0;
+        
+        /* Forzar salida de accept() cerrando el socket del servidor */
+        if (g_server_ctx->server_socket >= 0) {
+            LOG_INFO("Cerrando socket del servidor para forzar salida...");
+            close(g_server_ctx->server_socket);
+            g_server_ctx->server_socket = -1;
+        }
     }
 }
 
@@ -618,6 +683,11 @@ int run_server(int port)
             if (errno == EINTR) {
                 /* Interrupción por señal, continuar */
                 continue;
+            }
+            if (!server_ctx.running) {
+                /* El servidor se está cerrando, salir silenciosamente */
+                LOG_INFO("Socket del servidor cerrado, terminando bucle principal");
+                break;
             }
             LOG_ERROR("Error en accept: %s", strerror(errno));
             break;

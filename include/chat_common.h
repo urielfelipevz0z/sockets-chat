@@ -86,6 +86,7 @@ typedef struct {
     time_t connect_time;                    /* Tiempo de conexión */
     pthread_t thread_id;                    /* ID del thread del cliente */
     int active;                             /* Flag de estado activo */
+    int disconnect_notified;                /* Flag para evitar notificaciones duplicadas */
 } client_info_t;
 
 /**

@@ -13,6 +13,8 @@
 
 #include "chat_common.h"
 #include <termios.h>
+#include <sys/select.h>
+#include <sys/time.h>
 
 /* ========== CONSTANTES ESPECÍFICAS DEL CLIENTE ========== */
 
