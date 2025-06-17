@@ -1,0 +1,1231 @@
+---
+title: "Sistema de Chat TCP Cliente-Servidor"
+subtitle: "Documentación Técnica y Manual de Usuario"
+author: "Sistema de Chat Socket"
+date: "2025"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    theme: cosmo
+    code-block-bg: true
+    code-block-border-left: "#31BAE9"
+---
+
+# Introducción
+
+Este proyecto implementa un sistema completo de chat cliente-servidor utilizando sockets TCP en C. El sistema está diseñado para manejar múltiples clientes concurrentes con funcionalidad de broadcast de mensajes y notificaciones de conexión/desconexión.
+
+## Características Principales
+
+- **Servidor TCP multihilo**: Maneja hasta 50 clientes concurrentes
+- **Cliente con interfaz de terminal**: Interfaz de usuario intuitiva
+- **Comunicación bidireccional**: Mensajes en tiempo real
+- **Notificaciones del sistema**: Alertas de conexión y desconexión
+- **Arquitectura modular**: Código organizado y mantenible
+- **Thread safety**: Operaciones concurrentes seguras
+- **Manejo robusto de errores**: Gestión completa de excepciones
+
+# Arquitectura del Sistema
+
+## Modelo de Concurrencia
+
+El sistema utiliza un **modelo basado en threads** por las siguientes razones técnicas:
+
+### Justificación Técnica
+
+1. **Eficiencia de memoria**: Los threads comparten el espacio de direcciones, reduciendo el overhead comparado con procesos (`fork()`)
+2. **Comunicación simplificada**: Acceso directo a estructuras de datos compartidas sin necesidad de IPC
+3. **Escalabilidad**: Para 50 clientes concurrentes, los threads ofrecen mejor rendimiento
+4. **Sincronización**: Uso de mutexes para operaciones thread-safe en lugar de semáforos o pipes
+
+### Comparación: Threads vs Fork
+
+| Aspecto | Threads | Fork |
+|---------|---------|------|
+| Overhead de creación | Bajo | Alto |
+| Uso de memoria | Compartida | Duplicada |
+| Comunicación | Directa | IPC requerido |
+| Sincronización | Mutexes | Semáforos/Pipes |
+| Escalabilidad | Alta | Media |
+
+## Diagrama de Arquitectura
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        SERVIDOR PRINCIPAL                      │
+│                                                                 │
+│  ┌─────────────────┐    ┌─────────────────────────────────────┐ │
+│  │  Socket Server  │    │         Server Context             │ │
+│  │  (Puerto 8080)  │    │  • Lista de clientes [50]          │ │
+│  │                 │    │  • Mutex de sincronización         │ │
+│  └─────────────────┘    │  • Contador de clientes            │ │
+│           │              └─────────────────────────────────────┘ │
+│           │                                                     │
+│  ┌─────────▼─────────────────────────────────────────────────┐   │
+│  │                   BUCLE PRINCIPAL                       │   │
+│  │                   accept() clientes                     │   │
+│  └─────────┬─────────────────────────────────────────────────┘   │
+│            │                                                     │
+│  ┌─────────▼─────────┐ ┌─────────────────┐ ┌─────────────────┐   │
+│  │   Thread Cliente  │ │  Thread Cliente │ │       ...       │   │
+│  │       #1          │ │       #2        │ │  (hasta 50)     │   │
+│  │  • Recepción      │ │  • Recepción    │ │                 │   │
+│  │  • Procesamiento  │ │  • Procesamiento│ │                 │   │
+│  │  • Broadcast      │ │  • Broadcast    │ │                 │   │
+│  └───────────────────┘ └─────────────────┘ └─────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                         CLIENTE                                 │
+│                                                                 │
+│  ┌─────────────────┐    ┌─────────────────────────────────────┐ │
+│  │   Socket TCP    │    │         Client Context             │ │
+│  │  (Conexión al   │    │  • Información de usuario          │ │
+│  │   Servidor)     │    │  • Estado de conexión              │ │
+│  └─────────────────┘    │  • Configuración terminal          │ │
+│           │              └─────────────────────────────────────┘ │
+│           │                                                     │
+│  ┌─────────▼─────────────────────────────────────────────────┐   │
+│  │                 THREADS CONCURRENTES                    │   │
+│  └─────────┬─────────────────────────────────┬─────────────┘   │
+│            │                                 │                 │
+│  ┌─────────▼─────────┐                ┌─────▼─────────────────┐ │
+│  │  Thread Recepción │                │   Thread Entrada      │ │
+│  │  • recv() servidor│                │  • Lectura usuario    │ │
+│  │  • Procesar msgs  │                │  • Procesar comandos  │ │
+│  │  • Mostrar en UI  │                │  • Envío al servidor  │ │
+│  └───────────────────┘                └───────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Flujo de Comunicación
+
+### Proceso de Conexión
+
+```
+Cliente                                 Servidor
+  │                                        │
+  │──── TCP connect() ────────────────────▶│
+  │◄─── TCP accept() ──────────────────────│
+  │                                        │
+  │──── MSG_CONNECT + username ───────────▶│
+  │                                        │───┐
+  │                                        │   │ Validar usuario
+  │                                        │   │ Agregar a lista
+  │                                        │◄──┘
+  │◄─── MSG_NOTIFICATION "Bienvenido" ─────│
+  │                                        │
+  │◄─── Broadcast: "[Usuario X se conectó]"│
+  │                                        │
+```
+
+### Intercambio de Mensajes
+
+```
+Cliente A                 Servidor                 Cliente B, C, D...
+    │                        │                           │
+    │─── MSG_CHAT "Hola" ───▶│                           │
+    │                        │──┐                        │
+    │                        │  │ Procesar mensaje       │
+    │                        │  │ Preparar broadcast     │
+    │                        │◄─┘                        │
+    │                        │                           │
+    │◄─── Broadcast ─────────│ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ▶│
+    │   "Usuario A: Hola"    │      "Usuario A: Hola"    │
+```
+
+### Proceso de Desconexión
+
+```
+Cliente                                 Servidor
+  │                                        │
+  │──── MSG_DISCONNECT ───────────────────▶│
+  │                                        │───┐
+  │                                        │   │ Remover de lista
+  │                                        │   │ Cerrar socket
+  │                                        │◄──┘
+  │                                        │
+  │◄─── Broadcast: "[Usuario X se desconectó]"
+  │                                        │
+  │──── close() ──────────────────────────▶│
+```
+
+# Estructura del Proyecto
+
+## Organización de Directorios
+
+```
+sockets/
+├── src/                    # Código fuente
+│   ├── chat_common.c      # Funciones comunes
+│   ├── chat_server.c      # Implementación del servidor
+│   └── chat_client.c      # Implementación del cliente
+├── include/                # Archivos header
+│   ├── chat_common.h      # Definiciones comunes
+│   ├── chat_server.h      # Definiciones del servidor
+│   └── chat_client.h      # Definiciones del cliente
+├── bin/                    # Ejecutables compilados
+│   ├── chat_server        # Servidor ejecutable
+│   └── chat_client        # Cliente ejecutable
+├── obj/                    # Archivos objeto (.o)
+├── docs/                   # Documentación
+├── Makefile               # Sistema de compilación
+└── README.md              # Documentación principal
+```
+
+## Módulos del Sistema
+
+### Módulo Común (`chat_common.h/c`)
+
+**Responsabilidades:**
+- Definiciones de constantes globales
+- Estructuras de datos compartidas
+- Funciones de serialización/deserialización
+- Utilidades de logging thread-safe
+- Validación de datos
+
+**Estructuras Principales:**
+
+```c
+typedef struct {
+    message_type_t type;           // Tipo de mensaje
+    char username[USERNAME_SIZE];   // Usuario remitente
+    char content[MESSAGE_SIZE];     // Contenido del mensaje
+    time_t timestamp;              // Timestamp
+    size_t length;                 // Longitud total
+} chat_message_t;
+
+typedef struct {
+    int socket_fd;                 // Socket del cliente
+    char username[USERNAME_SIZE];   // Nombre de usuario
+    struct sockaddr_in address;    // Dirección IP
+    time_t connect_time;           // Tiempo de conexión
+    pthread_t thread_id;           // ID del thread
+    int active;                    // Estado activo
+} client_info_t;
+```
+
+### Módulo Servidor (`chat_server.h/c`)
+
+**Responsabilidades:**
+- Gestión de conexiones TCP
+- Manejo de threads por cliente
+- Broadcast de mensajes
+- Sincronización thread-safe
+- Notificaciones del sistema
+
+**Funciones Clave:**
+
+```c
+int run_server(int port);                    // Función principal
+void *handle_client_thread(void *args);     // Thread por cliente
+int broadcast_message(server_context_t *ctx, 
+                     const chat_message_t *msg, 
+                     int exclude_socket);    // Broadcast
+int add_client(server_context_t *ctx, ...); // Agregar cliente
+int remove_client(server_context_t *ctx, ...); // Remover cliente
+```
+
+### Módulo Cliente (`chat_client.h/c`)
+
+**Responsabilidades:**
+- Conexión al servidor
+- Interfaz de usuario terminal
+- Threads de entrada y recepción
+- Procesamiento de comandos
+- Manejo de desconexiones
+
+**Funciones Clave:**
+
+```c
+int run_client(const char *username, 
+               const char *server_ip, 
+               int server_port);            // Función principal
+void *receive_thread_func(void *args);     // Thread de recepción
+void *input_thread_func(void *args);       // Thread de entrada
+int process_client_command(client_context_t *ctx, 
+                          const char *input); // Comandos
+```
+
+# Protocolo de Comunicación
+
+## Tipos de Mensajes
+
+### MSG_CONNECT
+- **Propósito**: Establecer conexión inicial
+- **Dirección**: Cliente → Servidor
+- **Contenido**: Nombre de usuario
+- **Respuesta**: MSG_NOTIFICATION con confirmación
+
+### MSG_CHAT
+- **Propósito**: Enviar mensaje de chat
+- **Dirección**: Cliente → Servidor → Broadcast
+- **Contenido**: Texto del mensaje
+- **Procesamiento**: Retransmisión a todos los clientes
+
+### MSG_NOTIFICATION
+- **Propósito**: Notificaciones del sistema
+- **Dirección**: Servidor → Cliente(s)
+- **Contenido**: Mensajes de estado (conexión/desconexión)
+- **Formato**: `[Usuario X se conectó/desconectó]`
+
+### MSG_DISCONNECT
+- **Propósito**: Desconexión ordenada
+- **Dirección**: Cliente → Servidor
+- **Contenido**: Vacío
+- **Efecto**: Limpieza de recursos y notificación
+
+### MSG_ERROR
+- **Propósito**: Reportar errores
+- **Dirección**: Servidor → Cliente
+- **Contenido**: Descripción del error
+- **Casos**: Usuario inválido, servidor lleno
+
+### MSG_KEEPALIVE
+- **Propósito**: Mantener conexión viva
+- **Dirección**: Bidireccional
+- **Contenido**: Vacío
+- **Frecuencia**: Cada 60 segundos
+
+## Formato de Serialización
+
+Los mensajes se serializan como una copia directa de la estructura `chat_message_t`:
+
+```c
+struct serialized_message {
+    uint32_t type;              // 4 bytes
+    char username[32];          // 32 bytes
+    char content[928];          // 928 bytes  
+    uint64_t timestamp;         // 8 bytes
+    uint64_t length;            // 8 bytes
+    // Total: 980 bytes
+};
+```
+
+**Características:**
+- **Tamaño fijo**: Simplifica el parsing
+- **Network byte order**: Compatible entre arquitecturas
+- **Padding**: Alineación de memoria consistente
+
+# Concurrencia y Thread Safety
+
+## Estrategia de Sincronización
+
+### Servidor
+
+**Recurso compartido principal**: Lista de clientes conectados
+
+```c
+typedef struct {
+    client_info_t clients[MAX_CLIENTS];  // Array de clientes
+    int client_count;                    // Contador
+    pthread_mutex_t clients_mutex;       // Mutex de protección
+    int server_socket;                   // Socket principal
+    int running;                         // Estado del servidor
+} server_context_t;
+```
+
+**Operaciones protegidas:**
+- Agregar/remover clientes
+- Broadcast de mensajes
+- Consulta de estado de clientes
+
+**Patrón de uso:**
+```c
+pthread_mutex_lock(&ctx->clients_mutex);
+// Operación crítica sobre lista de clientes
+pthread_mutex_unlock(&ctx->clients_mutex);
+```
+
+### Cliente
+
+**Recurso compartido principal**: Salida de terminal
+
+```c
+pthread_mutex_t output_mutex;  // Protege printf/stdout
+```
+
+**Escenario de concurrencia:**
+- Thread de entrada: Lee input del usuario
+- Thread de recepción: Muestra mensajes del servidor
+- **Problema**: Salida mezclada en terminal
+- **Solución**: Mutex para operaciones de salida
+
+## Análisis de Deadlocks
+
+### Escenarios Potenciales
+
+1. **Orden de adquisición de mutexes**: Solo se usa un mutex por contexto
+2. **Locks anidados**: Evitados en el diseño
+3. **Timeouts**: No implementados para evitar complejidad
+
+### Prevención
+
+- **Orden consistente**: Un solo mutex por estructura
+- **Locks cortos**: Secciones críticas mínimas
+- **Evitar bloqueos**: Operaciones I/O fuera de locks
+
+## Gestión de Threads
+
+### Servidor: Modelo Thread-per-Client
+
+```c
+// Crear thread para nuevo cliente
+pthread_t client_thread;
+pthread_create(&client_thread, NULL, handle_client_thread, args);
+pthread_detach(client_thread);  // Auto-cleanup
+```
+
+**Ventajas:**
+- Escalabilidad hasta 50 clientes
+- Aislamiento de fallos por cliente
+- Limpieza automática con `pthread_detach()`
+
+### Cliente: Modelo Producer-Consumer
+
+```c
+// Thread de recepción (consumer)
+void *receive_thread_func(void *args) {
+    while (running) {
+        recv(socket, buffer, size, 0);
+        process_message(buffer);
+    }
+}
+
+// Thread de entrada (producer)
+void *input_thread_func(void *args) {
+    while (running) {
+        read_input(buffer);
+        send(socket, buffer, size, 0);
+    }
+}
+```
+
+# Manual de Compilación
+
+## Requisitos del Sistema
+
+### Dependencias Obligatorias
+
+- **Compilador**: GCC 4.8+ con soporte C99
+- **Sistema**: Linux (cualquier distribución moderna)
+- **Bibliotecas**: 
+  - `pthread` (POSIX threads)
+  - `libc` estándar
+
+### Verificar Dependencias
+
+```bash
+# Verificar GCC
+gcc --version
+
+# Verificar soporte pthread
+gcc -pthread --help | grep pthread
+
+# Verificar headers del sistema
+ls /usr/include/pthread.h
+ls /usr/include/sys/socket.h
+```
+
+## Proceso de Compilación
+
+### Compilación Básica (Release)
+
+```bash
+cd /home/beladen/Redes-de-Computadoras/sockets
+make all
+```
+
+**Salida esperada:**
+```
+Compilando módulo común...
+Compilando servidor...
+Compilando cliente...
+Enlazando servidor...
+Servidor compilado exitosamente: bin/chat_server
+Enlazando cliente...
+Cliente compilado exitosamente: bin/chat_client
+```
+
+### Compilación para Desarrollo (Debug)
+
+```bash
+make debug
+```
+
+**Características del modo debug:**
+- Símbolos de debugging (`-g`)
+- Sin optimizaciones (`-O0`)
+- Definición `DEBUG` activada
+- Warnings adicionales habilitados
+
+### Compilación Optimizada (Release)
+
+```bash
+make release
+```
+
+**Optimizaciones aplicadas:**
+- Optimización nivel 2 (`-O2`)
+- Definición `NDEBUG` (desactiva asserts)
+- Código optimizado para producción
+
+## Comandos del Makefile
+
+### Compilación
+
+| Comando | Descripción |
+|---------|-------------|
+| `make all` | Compilar todo (modo release) |
+| `make debug` | Compilar con información de debug |
+| `make release` | Compilar optimizado para producción |
+
+### Limpieza
+
+| Comando | Descripción |
+|---------|-------------|
+| `make clean` | Limpiar archivos compilados |
+| `make distclean` | Limpiar todo incluyendo directorios |
+
+### Testing
+
+| Comando | Descripción |
+|---------|-------------|
+| `make test-server` | Ejecutar servidor de prueba |
+| `make test-client` | Ejecutar cliente de prueba |
+| `make check` | Verificar sintaxis sin compilar |
+
+### Instalación
+
+| Comando | Descripción |
+|---------|-------------|
+| `make install` | Instalar en el sistema |
+| `make uninstall` | Desinstalar del sistema |
+
+### Utilidades
+
+| Comando | Descripción |
+|---------|-------------|
+| `make info` | Mostrar información del proyecto |
+| `make help` | Mostrar ayuda de comandos |
+| `make docs` | Generar documentación (requiere Doxygen) |
+
+## Resolución de Problemas de Compilación
+
+### Error: "pthread.h: No such file"
+
+**Solución:**
+```bash
+# Ubuntu/Debian
+sudo apt-get install libc6-dev
+
+# CentOS/RHEL
+sudo yum install glibc-devel
+
+# Arch Linux
+sudo pacman -S glibc
+```
+
+### Error: "undefined reference to pthread_create"
+
+**Causa**: Flag `-pthread` no incluido
+
+**Verificación**: El Makefile incluye `LDFLAGS = -pthread`
+
+### Error de permisos en make install
+
+**Solución:**
+```bash
+# Verificar permisos
+ls -la /usr/local/bin/
+
+# Ejecutar con sudo
+sudo make install
+```
+
+### Warnings sobre funciones obsoletas
+
+**Causa**: Versión antigua de GCC
+
+**Solución:**
+```bash
+# Verificar versión
+gcc --version
+
+# Actualizar si es necesario (Ubuntu/Debian)
+sudo apt-get update
+sudo apt-get install gcc
+```
+
+# Manual de Usuario
+
+## Instalación y Configuración
+
+### Instalación desde Código Fuente
+
+```bash
+# Clonar/descargar el proyecto
+cd /ruta/al/proyecto/sockets
+
+# Compilar
+make release
+
+# Verificar compilación
+ls -la bin/
+# Debe mostrar: chat_server y chat_client
+```
+
+### Instalación en el Sistema (Opcional)
+
+```bash
+# Instalar globalmente
+sudo make install
+
+# Verificar instalación
+which chat_server
+which chat_client
+
+# Usar desde cualquier directorio
+chat_server 8080
+```
+
+## Uso del Servidor
+
+### Inicio Básico
+
+```bash
+# Ejecutar con puerto por defecto (8080)
+./bin/chat_server
+
+# Ejecutar en puerto específico
+./bin/chat_server 9090
+```
+
+### Salida del Servidor
+
+```
+[10:30:15] [INFO] Iniciando servidor de chat en puerto 8080
+[10:30:15] [INFO] Contexto del servidor inicializado correctamente
+[10:30:15] [INFO] Socket del servidor creado y configurado en puerto 8080
+[10:30:15] [INFO] Manejadores de señales configurados
+[10:30:15] [INFO] Servidor iniciado correctamente. Esperando conexiones...
+
+=== ESTADÍSTICAS DEL SERVIDOR ===
+Estado: Ejecutándose
+Clientes conectados: 0/50
+Puerto: 8080
+===============================
+
+[10:30:45] [INFO] Nueva conexión desde 127.0.0.1:54321
+[10:30:45] [INFO] Thread iniciado para cliente en socket 4
+[10:30:45] [INFO] Cliente 'juan' agregado (total: 1/50)
+[10:30:45] [INFO] Notificación de conexión de 'juan' enviada a 0 clientes
+```
+
+### Comandos del Servidor
+
+| Comando | Acción |
+|---------|--------|
+| `Ctrl+C` | Cierre graceful del servidor |
+| `Ctrl+Z` | Pausar servidor (no recomendado) |
+
+### Monitoreo del Servidor
+
+El servidor muestra automáticamente:
+
+- **Conexiones nuevas**: IP y puerto del cliente
+- **Mensajes procesados**: Usuario y contenido
+- **Desconexiones**: Usuario y razón
+- **Estadísticas**: Número de clientes activos
+
+## Uso del Cliente
+
+### Conexión Básica
+
+```bash
+# Conectar con configuración por defecto
+./bin/chat_client mi_usuario
+
+# Conectar a servidor específico
+./bin/chat_client juan 192.168.1.100 8080
+```
+
+### Interfaz del Cliente
+
+Al conectar exitosamente, verás:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    CLIENTE DE CHAT TCP                     │
+│                                                             │
+│  • Escriba mensajes y presione Enter para enviarlos        │
+│  • Use /help para ver comandos disponibles                 │
+│  • Use /quit para salir del chat                           │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+
+[10:30:45] Conectado al chat. ¡Bienvenido!
+[10:30:45] [Usuario juan se conectó]
+> 
+```
+
+### Comandos del Cliente
+
+| Comando | Descripción |
+|---------|-------------|
+| `/help` o `/h` | Mostrar ayuda |
+| `/quit` o `/q` | Salir del chat |
+| `/status` o `/s` | Mostrar estado de conexión |
+
+### Ejemplo de Conversación
+
+```
+> Hola a todos!
+[10:31:02] <juan> Hola a todos!
+
+[10:31:15] <maria> ¡Hola Juan! ¿Cómo estás?
+
+> Muy bien, gracias. ¿Y tú?
+[10:31:25] <juan> Muy bien, gracias. ¿Y tú?
+
+[10:31:30] [Usuario pedro se conectó]
+
+[10:31:35] <pedro> ¡Hola grupo!
+
+> /status
+=== ESTADO DEL CLIENTE ===
+Usuario: juan
+Servidor: 127.0.0.1:8080
+Estado: Conectado
+Ejecutándose: Sí
+==========================
+
+> /quit
+Desconectando del chat...
+Cliente terminado.
+```
+
+## Escenarios de Uso Típicos
+
+### Caso 1: Chat Local para Desarrollo
+
+```bash
+# Terminal 1: Iniciar servidor
+./bin/chat_server 8080
+
+# Terminal 2: Cliente desarrollador
+./bin/chat_client dev_user1
+
+# Terminal 3: Cliente para pruebas
+./bin/chat_client test_user2
+```
+
+### Caso 2: Servidor en Red Local
+
+```bash
+# En el servidor (IP: 192.168.1.10)
+./bin/chat_server 8080
+
+# En los clientes
+./bin/chat_client alice 192.168.1.10 8080
+./bin/chat_client bob 192.168.1.10 8080
+./bin/chat_client charlie 192.168.1.10 8080
+```
+
+### Caso 3: Testing con Múltiples Usuarios
+
+```bash
+# Abrir múltiples terminales y conectar
+for i in {1..5}; do
+    gnome-terminal -- bash -c "./bin/chat_client user$i; exec bash"
+done
+```
+
+# Guía de Resolución de Problemas
+
+## Problemas de Conexión
+
+### Error: "Connection refused"
+
+**Síntomas:**
+```
+[ERROR] Error conectando al servidor: Connection refused
+```
+
+**Causas posibles:**
+1. Servidor no iniciado
+2. Puerto incorrecto
+3. Firewall bloqueando conexión
+
+**Soluciones:**
+```bash
+# Verificar si el servidor está ejecutándose
+ps aux | grep chat_server
+
+# Verificar puerto abierto
+netstat -ln | grep 8080
+
+# Verificar conectividad
+telnet 127.0.0.1 8080
+
+# Verificar firewall (Ubuntu/Debian)
+sudo ufw status
+sudo ufw allow 8080
+```
+
+### Error: "Address already in use"
+
+**Síntomas:**
+```
+[ERROR] Error en bind al puerto 8080: Address already in use
+```
+
+**Soluciones:**
+```bash
+# Encontrar proceso usando el puerto
+sudo lsof -i :8080
+
+# Terminar proceso anterior
+kill -9 <PID>
+
+# O usar puerto diferente
+./bin/chat_server 8081
+```
+
+## Problemas de Usuario
+
+### Error: "Nombre de usuario inválido"
+
+**Síntomas:**
+```
+Error: Nombre de usuario inválido 'user@123'
+El nombre debe contener solo letras, números y '_'
+```
+
+**Reglas de nombres válidos:**
+- Solo letras (a-z, A-Z)
+- Números (0-9)
+- Guión bajo (_)
+- Máximo 31 caracteres
+
+**Ejemplos válidos:**
+```bash
+./bin/chat_client juan
+./bin/chat_client usuario_123
+./bin/chat_client Alice2024
+```
+
+## Problemas de Rendimiento
+
+### Servidor Lento con Muchos Clientes
+
+**Síntomas:**
+- Mensajes tardan en aparecer
+- Conexiones nuevas lentas
+
+**Diagnóstico:**
+```bash
+# Verificar uso de CPU
+top -p $(pgrep chat_server)
+
+# Verificar número de threads
+cat /proc/$(pgrep chat_server)/status | grep Threads
+
+# Verificar descriptores de archivo
+ls -l /proc/$(pgrep chat_server)/fd | wc -l
+```
+
+**Soluciones:**
+- Verificar límites del sistema
+- Reducir número de clientes
+- Usar servidor en hardware más potente
+
+### Cliente Consume Mucha CPU
+
+**Causa**: Bucle de entrada muy agresivo
+
+**Solución temporal**: Modificar `usleep(100000)` en `input_thread_func()`
+
+## Problemas de Memoria
+
+### Memory Leaks
+
+**Diagnóstico con Valgrind:**
+```bash
+# Compilar en modo debug
+make debug
+
+# Ejecutar con Valgrind
+valgrind --leak-check=full ./bin/chat_server 8080
+```
+
+**Verificar limpieza correcta:**
+- Todos los `malloc()` tienen `free()` correspondiente
+- Todos los sockets se cierran con `SAFE_CLOSE()`
+- Todos los mutexes se destruyen
+
+## Problemas de Compilación
+
+### Headers No Encontrados
+
+**Error:**
+```
+fatal error: pthread.h: No such file or directory
+```
+
+**Solución:**
+```bash
+# Ubuntu/Debian
+sudo apt-get install build-essential libc6-dev
+
+# CentOS/RHEL  
+sudo yum groupinstall "Development Tools"
+
+# Verificar instalación
+ls /usr/include/pthread.h
+```
+
+### Warnings de Compilación
+
+**Warnings comunes y soluciones:**
+
+```c
+// Warning: unused parameter
+void function(int param) {
+    (void)param;  // Suprimir warning
+}
+
+// Warning: format string
+printf("%s", variable);  // En lugar de printf(variable);
+```
+
+## Logging y Debugging
+
+### Habilitar Logging Detallado
+
+```bash
+# Compilar en modo debug
+make debug
+
+# Ejecutar con output detallado
+./bin/chat_server 8080 2>&1 | tee server.log
+```
+
+### Debugging con GDB
+
+```bash
+# Compilar con símbolos
+make debug
+
+# Ejecutar en debugger
+gdb ./bin/chat_server
+(gdb) run 8080
+(gdb) bt          # Backtrace en caso de crash
+(gdb) info threads # Mostrar threads
+```
+
+# Casos de Uso Avanzados
+
+## Monitoreo del Sistema
+
+### Script de Monitoreo del Servidor
+
+```bash
+#!/bin/bash
+# monitor_server.sh
+
+while true; do
+    PID=$(pgrep chat_server)
+    if [ -n "$PID" ]; then
+        THREADS=$(cat /proc/$PID/status | grep Threads | awk '{print $2}')
+        FDS=$(ls -l /proc/$PID/fd | wc -l)
+        echo "$(date): PID=$PID, Threads=$THREADS, FDs=$FDS"
+    else
+        echo "$(date): Servidor no ejecutándose"
+    fi
+    sleep 30
+done
+```
+
+## Testing de Carga
+
+### Script para Múltiples Clientes
+
+```bash
+#!/bin/bash
+# stress_test.sh
+
+SERVER_IP="127.0.0.1"
+SERVER_PORT="8080"
+NUM_CLIENTS=20
+
+for i in $(seq 1 $NUM_CLIENTS); do
+    (
+        echo "Conectando cliente $i..."
+        echo -e "Hola desde cliente $i\n/quit" | ./bin/chat_client "user$i" $SERVER_IP $SERVER_PORT
+    ) &
+done
+
+wait
+echo "Test de carga completado"
+```
+
+## Configuración de Red
+
+### Servidor en Red Externa
+
+```bash
+# Configurar firewall
+sudo ufw allow 8080/tcp
+
+# Verificar binding en todas las interfaces
+netstat -ln | grep 8080
+
+# El servidor debe mostrar: 0.0.0.0:8080
+```
+
+### Cliente desde Red Externa
+
+```bash
+# Conectar a servidor remoto
+./bin/chat_client mi_usuario IP_PUBLICA_SERVIDOR 8080
+
+# Verificar conectividad
+ping IP_PUBLICA_SERVIDOR
+telnet IP_PUBLICA_SERVIDOR 8080
+```
+
+## Personalización
+
+### Modificar Límites
+
+En `include/chat_common.h`:
+
+```c
+#define MAX_CLIENTS         100     // Era 50
+#define BUFFER_SIZE         2048    // Era 1024
+#define USERNAME_SIZE       64      // Era 32
+```
+
+**Nota**: Recompilar después de cambios:
+```bash
+make clean
+make release
+```
+
+### Agregar Comandos Personalizados
+
+En `src/chat_client.c`, función `process_client_command()`:
+
+```c
+if (strcmp(input, "/time") == 0) {
+    time_t now = time(NULL);
+    printf("Hora actual: %s", ctime(&now));
+    return 1;
+}
+
+if (strncmp(input, "/nick ", 6) == 0) {
+    // Cambiar nombre de usuario
+    char *new_name = input + 6;
+    if (validate_username(new_name)) {
+        strncpy(ctx->username, new_name, USERNAME_SIZE-1);
+        printf("Nombre cambiado a: %s\n", new_name);
+    }
+    return 1;
+}
+```
+
+# Estándares de Código
+
+## Estilo de Codificación
+
+El proyecto sigue el **GNU C Coding Standards** con adaptaciones para sistemas embebidos:
+
+### Nomenclatura
+
+```c
+// Funciones: snake_case
+int process_client_message();
+void handle_client_disconnect();
+
+// Variables: snake_case
+int client_count;
+char server_ip[16];
+
+// Constantes: UPPER_CASE
+#define MAX_CLIENTS 50
+#define BUFFER_SIZE 1024
+
+// Tipos: snake_case_t
+typedef struct client_info_t;
+typedef enum message_type_t;
+```
+
+### Indentación
+
+```c
+// 4 espacios por nivel
+if (condition) {
+    if (nested_condition) {
+        do_something();
+    }
+}
+
+// Líneas largas: quebrar en 80 caracteres
+int very_long_function_name(int parameter_one,
+                           int parameter_two,
+                           const char *parameter_three);
+```
+
+### Comentarios
+
+```c
+/**
+ * @brief Descripción breve de la función
+ * 
+ * Descripción detallada que explica el propósito,
+ * comportamiento y consideraciones especiales.
+ * 
+ * @param param1 Descripción del primer parámetro
+ * @param param2 Descripción del segundo parámetro
+ * @return Valor de retorno y su significado
+ */
+int example_function(int param1, const char *param2);
+
+/* Comentario de una línea para código */
+client->active = 0;  /* Marcar cliente inactivo */
+```
+
+## Manejo de Errores
+
+### Estrategia Consistente
+
+```c
+// Retornar códigos de error específicos
+int function_that_can_fail() {
+    if (error_condition) {
+        LOG_ERROR("Descripción del error: %s", strerror(errno));
+        return ERROR_SPECIFIC_TYPE;
+    }
+    return SUCCESS;
+}
+
+// Verificar errores en llamadas
+int result = function_that_can_fail();
+if (result != SUCCESS) {
+    cleanup_resources();
+    return result;
+}
+```
+
+### Limpieza de Recursos
+
+```c
+// Patrón RAII adaptado para C
+int allocate_and_process() {
+    char *buffer = malloc(BUFFER_SIZE);
+    int socket_fd = -1;
+    int result = ERROR_MEMORY;
+    
+    if (!buffer) goto cleanup;
+    
+    socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0) goto cleanup;
+    
+    // Procesamiento...
+    result = SUCCESS;
+    
+cleanup:
+    free(buffer);
+    SAFE_CLOSE(socket_fd);
+    return result;
+}
+```
+
+## Mejores Prácticas
+
+### Thread Safety
+
+```c
+// Siempre proteger recursos compartidos
+pthread_mutex_lock(&shared_resource_mutex);
+// Operación atómica
+shared_counter++;
+pthread_mutex_unlock(&shared_resource_mutex);
+
+// Secciones críticas mínimas
+int local_copy;
+pthread_mutex_lock(&mutex);
+local_copy = shared_variable;
+pthread_mutex_unlock(&mutex);
+// Procesar local_copy fuera del lock
+```
+
+### Validación de Entrada
+
+```c
+// Validar todos los parámetros
+int safe_function(const char *input, size_t max_length) {
+    if (!input) {
+        LOG_ERROR("Parámetro input es NULL");
+        return ERROR_INVALID_PARAM;
+    }
+    
+    if (strlen(input) >= max_length) {
+        LOG_ERROR("Input demasiado largo: %zu >= %zu", 
+                  strlen(input), max_length);
+        return ERROR_INVALID_PARAM;
+    }
+    
+    // Procesar entrada válida...
+    return SUCCESS;
+}
+```
+
+### Logging Consistente
+
+```c
+// Usar macros de logging para consistencia
+LOG_INFO("Operación exitosa: %d clientes procesados", count);
+LOG_ERROR("Error en operación: %s", strerror(errno));
+LOG_DEBUG("Variable de debug: valor=%d", debug_var);
+
+// Incluir contexto relevante
+LOG_INFO("Cliente '%s' conectado desde %s:%d", 
+         username, inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+```
+
+# Conclusión
+
+Este sistema de chat TCP representa una implementación robusta y escalable que demuestra:
+
+## Logros Técnicos
+
+1. **Arquitectura sólida**: Separación clara entre servidor, cliente y componentes comunes
+2. **Concurrencia eficiente**: Uso apropiado de threads con sincronización thread-safe
+3. **Protocolo robusto**: Comunicación confiable con manejo de errores
+4. **Código mantenible**: Organización modular y documentación completa
+
+## Características Destacadas
+
+- **Escalabilidad**: Soporte para 50 clientes concurrentes
+- **Robustez**: Manejo completo de errores y casos edge
+- **Usabilidad**: Interfaz de terminal intuitiva con comandos útiles
+- **Portabilidad**: Código C estándar compatible con sistemas Linux
+
+## Aplicabilidad
+
+Este proyecto sirve como:
+
+- **Base educativa**: Ejemplo completo de programación de sockets
+- **Plantilla para desarrollo**: Fundación para aplicaciones más complejas
+- **Referencia técnica**: Implementación de mejores prácticas en C
+- **Herramienta funcional**: Sistema de chat útil para entornos locales
+
+El código implementa efectivamente todos los requerimientos establecidos, proporcionando una solución completa, profesional y bien documentada para comunicación cliente-servidor en tiempo real.
+
+---
+
+*Documentación generada para el Sistema de Chat TCP Cliente-Servidor - 2025*
