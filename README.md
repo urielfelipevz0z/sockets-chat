@@ -303,34 +303,6 @@ ps aux | grep chat_
 - No salas/canales separados
 - Red local/confiable recomendada
 
-## 🤝 Contribuciones
-
-### Reportar Problemas
-1. Describe el problema detalladamente
-2. Incluye logs relevantes
-3. Especifica SO y versión de GCC
-4. Pasos para reproducir
-
-### Mejoras Futuras
-- [ ] Encriptación TLS/SSL
-- [ ] Sistema de autenticación
-- [ ] Múltiples salas de chat
-- [ ] Persistencia de mensajes
-- [ ] Interfaz gráfica
-- [ ] Soporte para archivos/imágenes
-
-## 📚 Documentación Técnica
-
-- **Documentación completa**: Ver `docs/documentacion_tecnica.qmd`
-- **Comentarios en código**: Estilo Doxygen
-- **Standards**: GNU C99, POSIX threads
-
-## 📄 Licencia
-
-Este proyecto es de código abierto para fines educativos.
-
----
-
 **Desarrollado para el curso de Redes de Computadoras**  
 *Sistema robusto de chat TCP con arquitectura cliente-servidor*
 ===============================
