@@ -623,7 +623,6 @@ void print_server_stats(const server_context_t *ctx)
     printf("\n=== ESTADÍSTICAS DEL SERVIDOR ===\n");
     printf("Estado: %s\n", ctx->running ? "Ejecutándose" : "Detenido");
     printf("Clientes conectados: %d/%d\n", ctx->client_count, MAX_CLIENTS);
-    printf("Puerto: %d\n", DEFAULT_PORT);
     
     if (ctx->client_count > 0) {
         printf("\nClientes activos:\n");
